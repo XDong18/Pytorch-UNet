@@ -16,9 +16,16 @@ from torch.utils.tensorboard import SummaryWriter
 from utils.dataset import BasicDataset
 from torch.utils.data import DataLoader, random_split
 
-dir_img = 'data/imgs/'
-dir_mask = 'data/masks/'
-dir_checkpoint = 'checkpoints/'
+from mydiceloss import diceloss
+
+dir_img = '/shared/xudongliu/data/argoverse-tracking/argo_track/val/t_pc/'
+dir_mask = '/shared/xudongliu/data/argoverse-tracking/argo_track/val/instance_segment/'
+# dir_img = '/shared/xudongliu/seg_test/train/'
+# dir_mask = '/shared/xudongliu/seg_test/train_masks/'
+dir_checkpoint = 'checkpoints_0224/'
+device_ids = [1,2,3,4]
+#torch.cuda.empty_cache()
+#torch.cuda.set_device(2)
 
 
 def train_net(net,
@@ -30,14 +37,14 @@ def train_net(net,
               save_cp=True,
               img_scale=0.5):
 
-    dataset = BasicDataset(dir_img, dir_mask, img_scale)
+    dataset = BasicDataset(dir_img, dir_mask)
     n_val = int(len(dataset) * val_percent)
     n_train = len(dataset) - n_val
     train, val = random_split(dataset, [n_train, n_val])
-    train_loader = DataLoader(train, batch_size=batch_size, shuffle=True, num_workers=8, pin_memory=True)
-    val_loader = DataLoader(val, batch_size=batch_size, shuffle=False, num_workers=8, pin_memory=True)
-
-    writer = SummaryWriter(comment=f'LR_{lr}_BS_{batch_size}_SCALE_{img_scale}')
+    train_loader = DataLoader(train, batch_size=batch_size, shuffle=True, num_workers=1, pin_memory=True)
+    #val_loader = DataLoader(val, batch_size=batch_size, shuffle=False, num_workers=1, pin_memory=True)
+    
+    writer = SummaryWriter(log_dir= "experiment224", comment=f'LR_{lr}_BS_{batch_size}')
     global_step = 0
 
     logging.info(f'''Starting training:
@@ -52,55 +59,64 @@ def train_net(net,
     ''')
 
     optimizer = optim.RMSprop(net.parameters(), lr=lr, weight_decay=1e-8)
-    if net.n_classes > 1:
-        criterion = nn.CrossEntropyLoss()
-    else:
-        criterion = nn.BCEWithLogitsLoss()
+    #optimizer = nn.DataParallel(optimizer, device_ids=device_ids)
+    # if net.n_classes > 1:
+    criterion = nn.CrossEntropyLoss(ignore_index=-1)
+    #criterion = diceloss()
+    # else:
+    #criterion = nn.BCEWithLogitsLoss()
 
     for epoch in range(epochs):
         net.train()
 
         epoch_loss = 0
+        #print(epoch)
         with tqdm(total=n_train, desc=f'Epoch {epoch + 1}/{epochs}', unit='img') as pbar:
             for batch in train_loader:
                 imgs = batch['image']
                 true_masks = batch['mask']
-                assert imgs.shape[1] == net.n_channels, \
-                    f'Network has been defined with {net.n_channels} input channels, ' \
+                assert imgs.shape[1] == 1, \
+                    f'Network has been defined with {1} input channels, ' \
                     f'but loaded images have {imgs.shape[1]} channels. Please check that ' \
                     'the images are loaded correctly.'
 
                 imgs = imgs.to(device=device, dtype=torch.float32)
-                mask_type = torch.float32 if net.n_classes == 1 else torch.long
-                true_masks = true_masks.to(device=device, dtype=mask_type)
-
+                mask_type = torch.long
+                #mask_type = torch.float32
+                true_masks = true_masks.to(device=device, dtype=mask_type) 
+                #print("ready to net")
                 masks_pred = net(imgs)
+                #print("ready to loss")
+                # mask_pred
                 loss = criterion(masks_pred, true_masks)
+                #print("loss end")
                 epoch_loss += loss.item()
                 writer.add_scalar('Loss/train', loss.item(), global_step)
-
+                #print('loss', loss.item())
                 pbar.set_postfix(**{'loss (batch)': loss.item()})
 
+                #print("ready to updata")
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
+                #print("update end")
 
                 pbar.update(imgs.shape[0])
                 global_step += 1
-                if global_step % (len(dataset) // (10 * batch_size)) == 0:
-                    val_score = eval_net(net, val_loader, device, n_val)
-                    if net.n_classes > 1:
-                        logging.info('Validation cross entropy: {}'.format(val_score))
-                        writer.add_scalar('Loss/test', val_score, global_step)
+                # if global_step % (len(dataset) // (10 * batch_size)) == 0:
+                #     val_score = eval_net(net, val_loader, device, n_val)
+                #     # if net.n_classes > 1:
+                #     # logging.info('Validation cross entropy: {}'.format(val_score))
+                #     # writer.add_scalar('Loss/test', val_score, global_step)
 
-                    else:
-                        logging.info('Validation Dice Coeff: {}'.format(val_score))
-                        writer.add_scalar('Dice/test', val_score, global_step)
+                #     # else:
+                #     logging.info('Validation Dice Coeff: {}'.format(val_score))
+                #     writer.add_scalar('Dice/test', val_score, global_step)
 
-                    writer.add_images('images', imgs, global_step)
-                    if net.n_classes == 1:
-                        writer.add_images('masks/true', true_masks, global_step)
-                        writer.add_images('masks/pred', torch.sigmoid(masks_pred) > 0.5, global_step)
+                #     writer.add_images('images', imgs, global_step)
+                #     if net.n_classes == 1:
+                #         writer.add_images('masks/true', true_masks, global_step)
+                #         writer.add_images('masks/pred', torch.sigmoid(masks_pred) > 0.5, global_step)
 
         if save_cp:
             try:
@@ -122,11 +138,11 @@ def get_args():
                         help='Number of epochs', dest='epochs')
     parser.add_argument('-b', '--batch-size', metavar='B', type=int, nargs='?', default=1,
                         help='Batch size', dest='batchsize')
-    parser.add_argument('-l', '--learning-rate', metavar='LR', type=float, nargs='?', default=0.1,
+    parser.add_argument('-l', '--learning-rate', metavar='LR', type=float, nargs='?', default=0.01,
                         help='Learning rate', dest='lr')
     parser.add_argument('-f', '--load', dest='load', type=str, default=False,
                         help='Load model from a .pth file')
-    parser.add_argument('-s', '--scale', dest='scale', type=float, default=0.5,
+    parser.add_argument('-s', '--scale', dest='scale', type=float, default=1,
                         help='Downscaling factor of the images')
     parser.add_argument('-v', '--validation', dest='val', type=float, default=10.0,
                         help='Percent of the data that is used as validation (0-100)')
@@ -135,9 +151,16 @@ def get_args():
 
 
 if __name__ == '__main__':
+    # print(torch.cuda.device_count())
+    # print(torch.cuda.get_device_name())
+    # print(torch.cuda.current_device())
+    os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+    #torch.cuda.set_device(2)
+    #torch.cuda.empty_cache()
+    #print(torch.cuda.current_device())
     logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
     args = get_args()
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    device = torch.device('cuda:0')
     logging.info(f'Using device {device}')
 
     # Change here to adapt to your data
@@ -146,10 +169,10 @@ if __name__ == '__main__':
     #   - For 1 class and background, use n_classes=1
     #   - For 2 classes, use n_classes=1
     #   - For N > 2 classes, use n_classes=N
-    net = UNet(n_channels=1, n_classes=4)
+    net = UNet(n_channels=1, n_classes=1)
     logging.info(f'Network:\n'
-                 f'\t{net.n_channels} input channels\n'
-                 f'\t{net.n_classes} output channels (classes)\n'
+                 f'\t{1} input channels\n'
+                 f'\t{1} output channels (classes)\n'
                  f'\t{"Bilinear" if net.bilinear else "Dilated conv"} upscaling')
 
     if args.load:
@@ -157,8 +180,10 @@ if __name__ == '__main__':
             torch.load(args.load, map_location=device)
         )
         logging.info(f'Model loaded from {args.load}')
-
+    
     net.to(device=device)
+    #net = nn.DataParallel(net, device_ids=device_ids)
+    
     # faster convolutions, but more memory
     # cudnn.benchmark = True
 
